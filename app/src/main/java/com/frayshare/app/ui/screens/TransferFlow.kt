@@ -20,6 +20,7 @@ import androidx.compose.material.icons.filled.ContactPhone
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material.icons.filled.Wifi
@@ -56,10 +57,13 @@ import com.frayshare.app.core.model.DataKind
 import com.frayshare.app.core.model.JobState
 import com.frayshare.app.core.model.Role
 import com.frayshare.app.core.model.TransferProgress
+import com.frayshare.app.core.qr.Pairing
 import com.frayshare.app.core.source.Catalog
 import com.frayshare.app.core.source.Sources
 import com.frayshare.app.core.transfer.TransferController
 import com.frayshare.app.core.util.Format
+import com.frayshare.app.ui.QrImage
+import com.frayshare.app.ui.QrScanner
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -71,6 +75,7 @@ fun TransferFlow(
 ) {
     val context = LocalContext.current
     val progress by TransferController.progress.collectAsState()
+    val invite by TransferController.invite.collectAsState()
     val peer by Discovery.peer.collectAsState()
     var role by rememberSaveable { mutableStateOf(Role.NONE) }
     var granted by remember { mutableStateOf(false) }
@@ -132,6 +137,7 @@ fun TransferFlow(
                 ProgressCard(
                     progress = progress,
                     isReceiver = role == Role.RECEIVE,
+                    invite = if (progress.state == JobState.AWAITING_PEER) invite else null,
                     onDone = { TransferController.cancel() }
                 )
             }
@@ -153,6 +159,7 @@ fun TransferFlow(
                         strokeCap = StrokeCap.Round
                     )
                 } else {
+                    var scanning by remember { mutableStateOf(false) }
                     Text("Выберите, что отправить", style = MaterialTheme.typography.headlineSmall)
                     kinds.forEach { kind ->
                         KindRow(
@@ -176,8 +183,30 @@ fun TransferFlow(
                         enabled = items.isNotEmpty(),
                         searchLabel = if (fullMode) "Перенести всё" else "Искать получателя",
                         onSearch = { Discovery.startAnnouncing(Build.MODEL) },
+                        onScan = { scanning = true },
                         onConnect = { found -> TransferController.startSending(context, found, items) }
                     )
+                    if (scanning) {
+                        QrScanner(
+                            onPayload = { text ->
+                                scanning = false
+                                val found = Pairing.parse(text)
+                                if (found != null) {
+                                    TransferController.startSending(
+                                        context,
+                                        DiscoveredPeer(
+                                            name = "",
+                                            address = found.address,
+                                            port = found.port,
+                                            key = found.key
+                                        ),
+                                        items
+                                    )
+                                }
+                            },
+                            onDismiss = { scanning = false }
+                        )
+                    }
                     TextButton(onClick = { Discovery.stop(); role = Role.NONE }) {
                         Text("Назад")
                     }
@@ -186,7 +215,7 @@ fun TransferFlow(
             else -> {
                 Text("Приём передачи", style = MaterialTheme.typography.headlineSmall)
                 Text(
-                    "Телефон виден другим устройствам Fray в этой сети. На старом телефоне выберите «${if (fullMode) "Перенести всё" else "Искать получателя"}» и подключитесь.",
+                    "На этом телефоне появится QR. На старом нажмите «Сканировать QR» и наведите камеру. Без камеры сработает поиск по сети: там выберите «${if (fullMode) "Перенести всё" else "Искать получателя"}».",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -328,6 +357,7 @@ private fun PeerPanel(
     enabled: Boolean,
     searchLabel: String,
     onSearch: () -> Unit,
+    onScan: () -> Unit,
     onConnect: (DiscoveredPeer) -> Unit
 ) {
     if (peer == null) {
@@ -338,6 +368,15 @@ private fun PeerPanel(
             shape = MaterialTheme.shapes.large
         ) {
             Text(searchLabel)
+        }
+        OutlinedButton(
+            onClick = onScan,
+            enabled = enabled,
+            modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.large
+        ) {
+            Icon(Icons.Filled.QrCode2, contentDescription = null)
+            Text("Сканировать QR")
         }
         Text(
             "Оба устройства должны быть в одной сети Wi-Fi или в точке доступа одного из них",
@@ -366,6 +405,7 @@ private fun PeerPanel(
 private fun ProgressCard(
     progress: TransferProgress,
     isReceiver: Boolean,
+    invite: String?,
     onDone: () -> Unit
 ) {
     Card(
@@ -377,6 +417,20 @@ private fun ProgressCard(
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             Text(statusText(progress), style = MaterialTheme.typography.headlineSmall)
+            if (progress.state == JobState.AWAITING_PEER && invite != null) {
+                QrImage(
+                    invite,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(280.dp)
+                        .padding(horizontal = 24.dp)
+                )
+                Text(
+                    "На старом телефоне: «Сканировать QR». Приём пойдёт по шифрованному каналу.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             if (progress.currentName.isNotBlank()) {
                 Text(
                     progress.currentName,

@@ -1,29 +1,28 @@
 package com.frayshare.app.core.transfer
 
-import android.content.ContentValues
 import android.content.Context
 import android.os.Build
-import android.os.Environment
-import android.provider.MediaStore
+import com.frayshare.app.core.crypto.BoxChannel
+import com.frayshare.app.core.crypto.Keys
 import com.frayshare.app.core.model.JobState
 import com.frayshare.app.core.model.TransferProgress
-import com.frayshare.app.core.util.Mime
+import com.frayshare.app.core.qr.Pairing
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.DataInputStream
 import java.io.DataOutputStream
-import java.io.File
-import java.io.FileOutputStream
-import java.io.OutputStream
 import java.net.ServerSocket
+import java.net.Socket
 
 object Receiver {
 
     suspend fun receive(
         context: Context,
+        pairingKey: ByteArray?,
         onProgress: (TransferProgress) -> Unit
     ): JobResult = withContext(Dispatchers.IO) {
         var receivedBytes = 0L
@@ -32,68 +31,77 @@ object Receiver {
         val server = ServerSocket(Protocol.PORT)
         try {
             onProgress(TransferProgress(state = JobState.AWAITING_PEER))
-            server.soTimeout = 0
             val socket = server.accept()
             try {
                 socket.tcpNoDelay = true
-                val input = Protocol.input(socket)
-                val output = Protocol.output(socket)
-                val manifest = Protocol.readMessage(input)
+                val rawInput = Protocol.input(socket)
+                val rawOutput = Protocol.output(socket)
+                val channel = handshake(rawInput, rawOutput, pairingKey)
+                val manifest = readJson(channel)
                 device = manifest.optString("device")
                 val entries = manifest.optJSONArray("items")?.let { array ->
                     (0 until array.length()).map { array.getJSONObject(it) }
                 } ?: emptyList()
-                val totalBytes = entries.sumOf { it.optLong("size") }
+                val names = entries.map { it.optString("name") }
+                val sizes = entries.map { it.optLong("size") }
+                val staging = Staging(context)
+                val plan = Plan.compute(sizes, names.map { staging.stored(it) })
+                channel.send(planMessage(plan))
+                val totalBytes = sizes.sumOf { it }
+                val resumeBytes = plan.sumOf { it.offset }
+                receivedBytes = resumeBytes
                 onProgress(
                     TransferProgress(
                         state = JobState.CONNECTED,
                         totalItems = entries.size,
                         bytesTotal = totalBytes,
+                        bytesDone = receivedBytes,
                         peerName = device
                     )
                 )
-                for (index in entries.indices) {
+                var lastEmit = 0L
+                for (position in entries.indices) {
                     ensureActive()
-                    val header = Protocol.readMessage(input)
-                    if (header.optString("type") != "item") {
+                    val header = readJson(channel)
+                    if (header.optString("type") != "item" || header.optInt("index") != position) {
                         throw IllegalStateException("bad item header")
                     }
                     val size = header.optLong("size")
-                    val name = entries[index].optString("name")
-                    val target = saveTarget(context, name)
-                    target.use { sink ->
-                        val buffer = ByteArray(Protocol.CHUNK)
-                        var done = 0L
-                        var lastEmit = 0L
-                        while (done < size) {
-                            ensureActive()
-                            val step = minOf(Protocol.CHUNK.toLong(), size - done).toInt()
-                            val read = input.read(buffer, 0, step)
-                            if (read < 0) throw IllegalStateException("stream ended early")
-                            sink.write(buffer, 0, read)
-                            done += read
-                            receivedBytes += read
-                            val now = System.currentTimeMillis()
-                            if (now - lastEmit > 120) {
-                                lastEmit = now
-                                onProgress(
-                                    TransferProgress(
-                                        state = JobState.RUNNING,
-                                        currentItem = index + 1,
-                                        totalItems = entries.size,
-                                        currentName = name,
-                                        bytesDone = receivedBytes,
-                                        bytesTotal = totalBytes,
-                                        peerName = device
+                    val offset = header.optLong("offset")
+                    if (size != sizes[position] || offset != plan[position].offset) {
+                        throw IllegalStateException("plan mismatch for ${names[position]}")
+                    }
+                    val name = names[position]
+                    if (offset < size) {
+                        val sink = staging.sink(name, offset == 0L)
+                        sink.use { target ->
+                            var done = offset
+                            while (done < size) {
+                                ensureActive()
+                                val frame = channel.receive()
+                                target.write(frame)
+                                done += frame.size
+                                receivedBytes += frame.size
+                                val now = System.currentTimeMillis()
+                                if (now - lastEmit > 120) {
+                                    lastEmit = now
+                                    onProgress(
+                                        running(
+                                            position + 1, entries.size, name,
+                                            receivedBytes, totalBytes, device
+                                        )
                                     )
-                                )
+                                }
                             }
                         }
                     }
+                    staging.finalize(name)
+                    channel.send(
+                        JSONObject().put("type", "ack").put("index", position).toString().toByteArray()
+                    )
                     receivedItems += 1
-                    Protocol.writeMessage(
-                        output,
-                        JSONObject().put("type", "ack").put("index", index)
+                    onProgress(
+                        running(position + 1, entries.size, name, receivedBytes, totalBytes, device)
                     )
                 }
                 JobResult(success = true, items = receivedItems, bytes = receivedBytes, device = device)
@@ -110,21 +118,73 @@ object Receiver {
         }
     }
 
-    private fun saveTarget(context: Context, name: String): OutputStream {
-        val resolver = context.contentResolver
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val values = ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, name)
-                put(MediaStore.MediaColumns.MIME_TYPE, Mime.of(name))
-                put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Fray")
-            }
-            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                ?: throw IllegalStateException("cannot create $name")
-            return resolver.openOutputStream(uri)
-                ?: throw IllegalStateException("cannot open $name")
+    private fun handshake(
+        rawInput: DataInputStream,
+        rawOutput: DataOutputStream,
+        pairingKey: ByteArray?
+    ): BoxChannel {
+        val hello = Protocol.readMessage(rawInput)
+        if (hello.optString("type") != "hello") {
+            throw IllegalStateException("expected hello")
         }
-        val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Fray")
-        dir.mkdirs()
-        return FileOutputStream(File(dir, name))
+        val key: ByteArray
+        when (hello.optString("mode")) {
+            Sender.MODE_PSK -> {
+                key = pairingKey ?: throw IllegalStateException("no pairing session")
+            }
+            Sender.MODE_ECDH -> {
+                val pair = Keys.ecKeyPair()
+                val salt = Keys.random(16)
+                Protocol.writeMessage(
+                    rawOutput,
+                    JSONObject()
+                        .put("type", "hello")
+                        .put("device", Build.MODEL)
+                        .put("pub", Pairing.encode(pair.public.encoded))
+                        .put("salt", Pairing.encode(salt))
+                )
+                key = Keys.sharedKey(
+                    pair.private,
+                    Pairing.decode(hello.optString("pub")),
+                    salt
+                )
+            }
+            else -> throw IllegalStateException("unknown mode ${hello.optString("mode")}")
+        }
+        if (hello.optString("mode") == Sender.MODE_PSK) {
+            Protocol.writeMessage(
+                rawOutput,
+                JSONObject().put("type", "hello").put("device", Build.MODEL)
+            )
+        }
+        return BoxChannel(rawInput, rawOutput, key)
     }
+
+    private fun planMessage(plan: List<ItemPlan>): ByteArray {
+        val array = JSONArray()
+        plan.forEach { entry ->
+            array.put(JSONObject().put("index", entry.index).put("offset", entry.offset))
+        }
+        return JSONObject().put("type", "plan").put("plan", array).toString().toByteArray()
+    }
+
+    private fun running(
+        currentItem: Int,
+        totalItems: Int,
+        currentName: String,
+        bytesDone: Long,
+        bytesTotal: Long,
+        peerName: String
+    ): TransferProgress = TransferProgress(
+        state = JobState.RUNNING,
+        currentItem = currentItem,
+        totalItems = totalItems,
+        currentName = currentName,
+        bytesDone = bytesDone,
+        bytesTotal = bytesTotal,
+        peerName = peerName
+    )
+
+    private fun readJson(channel: BoxChannel): JSONObject =
+        JSONObject(String(channel.receive(), Charsets.UTF_8))
 }

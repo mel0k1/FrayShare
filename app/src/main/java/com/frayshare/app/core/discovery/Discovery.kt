@@ -19,7 +19,8 @@ import java.net.SocketTimeoutException
 data class DiscoveredPeer(
     val name: String,
     val address: String,
-    val port: Int
+    val port: Int,
+    val key: ByteArray? = null
 )
 
 object Discovery {

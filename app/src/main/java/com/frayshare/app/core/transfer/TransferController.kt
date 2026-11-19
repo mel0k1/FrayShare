@@ -1,7 +1,9 @@
 package com.frayshare.app.core.transfer
 
 import android.content.Context
+import com.frayshare.app.core.crypto.Keys
 import com.frayshare.app.core.discovery.Discovery
+import com.frayshare.app.core.discovery.LocalIp
 import com.frayshare.app.core.discovery.DiscoveredPeer
 import com.frayshare.app.core.history.HistoryStore
 import com.frayshare.app.core.model.HistoryEntry
@@ -9,6 +11,7 @@ import com.frayshare.app.core.model.JobDirection
 import com.frayshare.app.core.model.JobState
 import com.frayshare.app.core.model.TransferItem
 import com.frayshare.app.core.model.TransferProgress
+import com.frayshare.app.core.qr.Pairing
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -28,6 +31,9 @@ object TransferController {
 
     private val _history = MutableStateFlow<List<HistoryEntry>>(emptyList())
     val history: StateFlow<List<HistoryEntry>> = _history.asStateFlow()
+
+    private val _invite = MutableStateFlow<String?>(null)
+    val invite: StateFlow<String?> = _invite.asStateFlow()
 
     private var activeJob: Job? = null
 
@@ -51,9 +57,13 @@ object TransferController {
 
     fun startReceiving(context: Context) {
         if (busy()) return
+        val key = Keys.random(32)
+        val address = LocalIp.first()
+        _invite.value = address?.let { Pairing.build(it, Protocol.PORT, key) }
         _progress.value = TransferProgress(state = JobState.AWAITING_PEER)
         activeJob = scope.launch {
-            val result = Receiver.receive(context) { update -> _progress.value = update }
+            val result = Receiver.receive(context, key) { update -> _progress.value = update }
+            _invite.value = null
             finish(context, result, JobDirection.RECEIVE)
         }
     }
@@ -62,6 +72,7 @@ object TransferController {
         activeJob?.cancel()
         activeJob = null
         Discovery.stop()
+        _invite.value = null
         _progress.value = TransferProgress(state = JobState.IDLE)
     }
 
