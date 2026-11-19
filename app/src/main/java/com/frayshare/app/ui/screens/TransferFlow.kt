@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
@@ -51,6 +52,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.frayshare.app.core.direct.DirectState
+import com.frayshare.app.core.direct.WifiDirect
 import com.frayshare.app.core.discovery.DiscoveredPeer
 import com.frayshare.app.core.discovery.Discovery
 import com.frayshare.app.core.model.DataKind
@@ -60,6 +63,7 @@ import com.frayshare.app.core.model.TransferProgress
 import com.frayshare.app.core.qr.Pairing
 import com.frayshare.app.core.source.Catalog
 import com.frayshare.app.core.source.Sources
+import com.frayshare.app.core.transfer.Protocol
 import com.frayshare.app.core.transfer.TransferController
 import com.frayshare.app.core.util.Format
 import com.frayshare.app.ui.QrImage
@@ -125,7 +129,7 @@ fun TransferFlow(
                 ) {
                     Text("Переезд на новый телефон", style = MaterialTheme.typography.headlineSmall)
                     Text(
-                        "Соберёт контакты, фото, видео, приложения и файлы из загрузок. Оба устройства подключите к одной сети Wi-Fi или к точке доступа одного из них. Настройки, переписки и внутренние данные приложений не переносятся — для них делайте резервную копию Google.",
+                        "Соберёт контакты, фото, видео, приложения и файлы из загрузок. Оба устройства соедините через одну сеть Wi-Fi, точку доступа одного из них или Wi-Fi Direct. Настройки, переписки и внутренние данные приложений не переносятся — для них делайте резервную копию Google.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -178,6 +182,16 @@ fun TransferFlow(
                         style = MaterialTheme.typography.bodyLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    val direct by WifiDirect.state.collectAsState()
+                    LaunchedEffect(direct) {
+                        val ready = direct as? DirectState.Ready ?: return@LaunchedEffect
+                        WifiDirect.stopScanning()
+                        TransferController.startSending(
+                            context,
+                            DiscoveredPeer(name = ready.name, address = ready.address, port = Protocol.PORT),
+                            items
+                        )
+                    }
                     PeerPanel(
                         peer = peer,
                         enabled = items.isNotEmpty(),
@@ -186,6 +200,34 @@ fun TransferFlow(
                         onScan = { scanning = true },
                         onConnect = { found -> TransferController.startSending(context, found, items) }
                     )
+                    if (direct is DirectState.Peers && (direct as DirectState.Peers).devices.size > 1) {
+                        val devices = (direct as DirectState.Peers).devices
+                        AlertDialog(
+                            onDismissRequest = { WifiDirect.shutdown() },
+                            title = { Text("Устройства Wi-Fi Direct") },
+                            text = {
+                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    devices.forEach { device ->
+                                        TextButton(onClick = { WifiDirect.connect(device) }) {
+                                            Text(device.name)
+                                        }
+                                    }
+                                }
+                            },
+                            confirmButton = {},
+                            dismissButton = {
+                                TextButton(onClick = { WifiDirect.shutdown() }) { Text("Отмена") }
+                            }
+                        )
+                    }
+                    when (val snapshot = direct) {
+                        is DirectState.Scanning -> DirectStatus("Ищу устройства Wi-Fi Direct...")
+                        is DirectState.Connecting -> DirectStatus(
+                            "Подключаюсь к ${snapshot.name}. Подтвердите запрос Android на другом телефоне"
+                        )
+                        is DirectState.Failed -> DirectStatus(snapshot.message, error = true)
+                        else -> {}
+                    }
                     if (scanning) {
                         QrScanner(
                             onPayload = { text ->
@@ -215,7 +257,7 @@ fun TransferFlow(
             else -> {
                 Text("Приём передачи", style = MaterialTheme.typography.headlineSmall)
                 Text(
-                    "На этом телефоне появится QR. На старом нажмите «Сканировать QR» и наведите камеру. Без камеры сработает поиск по сети: там выберите «${if (fullMode) "Перенести всё" else "Искать получателя"}».",
+                    "На этом телефоне появится QR. На старом нажмите «Сканировать QR» и наведите камеру. Работает и поиск по сети — там выберите «${if (fullMode) "Перенести всё" else "Искать получателя"}». Для Wi-Fi Direct роутер не нужен: нажмите здесь «Ожидать подключение», на старом телефоне — «Wi-Fi Direct» и подтвердите запрос Android",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -267,6 +309,27 @@ private fun statusText(progress: TransferProgress): String = when (progress.stat
     JobState.COMPLETED -> "Готово"
     JobState.FAILED -> "Ошибка"
     JobState.IDLE -> ""
+}
+
+@Composable
+private fun DirectStatus(message: String, error: Boolean = false) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (!error) {
+            LinearProgressIndicator(
+                modifier = Modifier.fillMaxWidth(),
+                strokeCap = StrokeCap.Round
+            )
+        }
+        Text(
+            message,
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (error) {
+                MaterialTheme.colorScheme.error
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            }
+        )
+    }
 }
 
 @Composable
@@ -360,6 +423,15 @@ private fun PeerPanel(
     onScan: () -> Unit,
     onConnect: (DiscoveredPeer) -> Unit
 ) {
+    val context = LocalContext.current
+    val directPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        Manifest.permission.NEARBY_WIFI_DEVICES
+    } else {
+        Manifest.permission.ACCESS_FINE_LOCATION
+    }
+    val directLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { given -> if (given) WifiDirect.start(context) }
     if (peer == null) {
         Button(
             onClick = onSearch,
@@ -378,8 +450,25 @@ private fun PeerPanel(
             Icon(Icons.Filled.QrCode2, contentDescription = null)
             Text("Сканировать QR")
         }
+        OutlinedButton(
+            onClick = {
+                if (ContextCompat.checkSelfPermission(context, directPermission) ==
+                    PackageManager.PERMISSION_GRANTED
+                ) {
+                    WifiDirect.start(context)
+                } else {
+                    directLauncher.launch(directPermission)
+                }
+            },
+            enabled = enabled,
+            modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.large
+        ) {
+            Icon(Icons.Filled.Wifi, contentDescription = null)
+            Text("Wi-Fi Direct")
+        }
         Text(
-            "Оба устройства должны быть в одной сети Wi-Fi или в точке доступа одного из них",
+            "QR и поиск работают в одной сети Wi-Fi. Wi-Fi Direct соединяет телефоны напрямую, без общего роутера",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -447,6 +536,13 @@ private fun ProgressCard(
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            if (progress.speedBps > 0) {
+                Text(
+                    "${Format.bytes(progress.speedBps)}/с",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             if (progress.totalItems > 0) {
                 Text(
                     "${progress.currentItem} из ${progress.totalItems}",

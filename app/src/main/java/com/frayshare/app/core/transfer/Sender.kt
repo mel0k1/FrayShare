@@ -75,6 +75,8 @@ object Sender {
                         val buffer = ByteArray(Protocol.CHUNK)
                         var done = offset
                         var lastEmit = 0L
+                        var lastEmitBytes = sentBytes
+                        var lastEmitTime = 0L
                         while (true) {
                             ensureActive()
                             val read = stream.read(buffer)
@@ -84,11 +86,15 @@ object Sender {
                             sentBytes += read
                             val now = System.currentTimeMillis()
                             if (now - lastEmit > 120) {
+                                val speed = (sentBytes - lastEmitBytes) * 1000 /
+                                    maxOf(now - lastEmitTime, 1L)
+                                lastEmitBytes = sentBytes
+                                lastEmitTime = now
                                 lastEmit = now
                                 onProgress(
                                     running(
                                         index, items.size, item.name,
-                                        sentBytes, totalBytes, peerName
+                                        sentBytes, totalBytes, peerName, speed
                                     )
                                 )
                             }
@@ -174,7 +180,8 @@ object Sender {
         currentName: String,
         bytesDone: Long,
         bytesTotal: Long,
-        peerName: String
+        peerName: String,
+        speedBps: Long = 0
     ): TransferProgress = TransferProgress(
         state = JobState.RUNNING,
         currentItem = currentItem,
@@ -182,7 +189,8 @@ object Sender {
         currentName = currentName,
         bytesDone = bytesDone,
         bytesTotal = bytesTotal,
-        peerName = peerName
+        peerName = peerName,
+        speedBps = speedBps
     )
 
     private fun manifest(items: List<TransferItem>): ByteArray {

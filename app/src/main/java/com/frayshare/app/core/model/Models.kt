@@ -44,7 +44,8 @@ data class TransferProgress(
     val currentName: String = "",
     val bytesDone: Long = 0,
     val bytesTotal: Long = 0,
-    val peerName: String = ""
+    val peerName: String = "",
+    val speedBps: Long = 0
 )
 
 data class HistoryEntry(

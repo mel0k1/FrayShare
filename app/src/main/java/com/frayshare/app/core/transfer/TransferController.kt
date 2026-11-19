@@ -1,7 +1,9 @@
 package com.frayshare.app.core.transfer
 
 import android.content.Context
+import android.os.PowerManager
 import com.frayshare.app.core.crypto.Keys
+import com.frayshare.app.core.direct.WifiDirect
 import com.frayshare.app.core.discovery.Discovery
 import com.frayshare.app.core.discovery.LocalIp
 import com.frayshare.app.core.discovery.DiscoveredPeer
@@ -36,6 +38,7 @@ object TransferController {
     val invite: StateFlow<String?> = _invite.asStateFlow()
 
     private var activeJob: Job? = null
+    private var wakeLock: PowerManager.WakeLock? = null
 
     private fun busy() = activeJob?.isActive == true
 
@@ -48,6 +51,8 @@ object TransferController {
     fun startSending(context: Context, peer: DiscoveredPeer, items: List<TransferItem>) {
         if (busy() || items.isEmpty()) return
         Discovery.stop()
+        WifiDirect.stopScanning()
+        holdCpu(context)
         _progress.value = TransferProgress(state = JobState.CONNECTED, totalItems = items.size)
         activeJob = scope.launch {
             val result = Sender.send(context, peer, items) { update -> _progress.value = update }
@@ -60,6 +65,7 @@ object TransferController {
         val key = Keys.random(32)
         val address = LocalIp.first()
         _invite.value = address?.let { Pairing.build(it, Protocol.PORT, key) }
+        holdCpu(context)
         _progress.value = TransferProgress(state = JobState.AWAITING_PEER)
         activeJob = scope.launch {
             val result = Receiver.receive(context, key) { update -> _progress.value = update }
@@ -72,12 +78,27 @@ object TransferController {
         activeJob?.cancel()
         activeJob = null
         Discovery.stop()
+        WifiDirect.shutdown()
+        releaseCpu()
         _invite.value = null
         _progress.value = TransferProgress(state = JobState.IDLE)
     }
 
+    private fun holdCpu(context: Context) {
+        val power = context.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+        wakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Fray:transfer")
+            .also { it.acquire(WAKE_LIMIT_MS) }
+    }
+
+    private fun releaseCpu() {
+        runCatching { wakeLock?.release() }
+        wakeLock = null
+    }
+
     private fun finish(context: Context, result: JobResult, direction: JobDirection) {
         if (!scope.isActive) return
+        releaseCpu()
+        WifiDirect.shutdown()
         _progress.value = _progress.value.copy(
             state = if (result.success) JobState.COMPLETED else JobState.FAILED
         )
@@ -95,4 +116,6 @@ object TransferController {
             HistoryStore.append(context, entry)
         }
     }
+
+    private const val WAKE_LIMIT_MS = 60L * 60 * 1000
 }

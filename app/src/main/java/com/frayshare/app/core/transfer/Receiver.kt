@@ -76,6 +76,8 @@ object Receiver {
                         val sink = staging.sink(name, offset == 0L)
                         sink.use { target ->
                             var done = offset
+                            var lastEmitBytes = receivedBytes
+                            var lastEmitTime = 0L
                             while (done < size) {
                                 ensureActive()
                                 val frame = channel.receive()
@@ -84,11 +86,15 @@ object Receiver {
                                 receivedBytes += frame.size
                                 val now = System.currentTimeMillis()
                                 if (now - lastEmit > 120) {
+                                    val speed = (receivedBytes - lastEmitBytes) * 1000 /
+                                        maxOf(now - lastEmitTime, 1L)
+                                    lastEmitBytes = receivedBytes
+                                    lastEmitTime = now
                                     lastEmit = now
                                     onProgress(
                                         running(
                                             position + 1, entries.size, name,
-                                            receivedBytes, totalBytes, device
+                                            receivedBytes, totalBytes, device, speed
                                         )
                                     )
                                 }
@@ -174,7 +180,8 @@ object Receiver {
         currentName: String,
         bytesDone: Long,
         bytesTotal: Long,
-        peerName: String
+        peerName: String,
+        speedBps: Long = 0
     ): TransferProgress = TransferProgress(
         state = JobState.RUNNING,
         currentItem = currentItem,
@@ -182,7 +189,8 @@ object Receiver {
         currentName = currentName,
         bytesDone = bytesDone,
         bytesTotal = bytesTotal,
-        peerName = peerName
+        peerName = peerName,
+        speedBps = speedBps
     )
 
     private fun readJson(channel: BoxChannel): JSONObject =
