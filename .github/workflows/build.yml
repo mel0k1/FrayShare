@@ -16,8 +16,18 @@ jobs:
           distribution: temurin
           java-version: "21"
       - uses: gradle/actions/setup-gradle@v4
-      - run: ./gradlew :app:assembleDebug :app:testDebugUnitTest
+      - run: echo "${{ secrets.FRAY_KEYSTORE_BASE64 }}" | base64 -d > fray-release.jks
+      - run: ./gradlew :app:assembleDebug :app:assembleRelease :app:testDebugUnitTest
+        env:
+          FRAY_KEYSTORE: ${{ github.workspace }}/fray-release.jks
+          FRAY_KEYSTORE_PASSWORD: ${{ secrets.FRAY_KEYSTORE_PASSWORD }}
+          FRAY_KEY_ALIAS: ${{ secrets.FRAY_KEY_ALIAS }}
+          FRAY_KEY_PASSWORD: ${{ secrets.FRAY_KEY_PASSWORD }}
       - uses: actions/upload-artifact@v4
         with:
           name: fray-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fray-release-apk
+          path: app/build/outputs/apk/release/app-release.apk

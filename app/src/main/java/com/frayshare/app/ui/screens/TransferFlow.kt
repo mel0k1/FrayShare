@@ -1,6 +1,7 @@
 package com.frayshare.app.ui.screens
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -43,6 +44,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -59,6 +61,7 @@ import com.frayshare.app.core.discovery.Discovery
 import com.frayshare.app.core.model.DataKind
 import com.frayshare.app.core.model.JobState
 import com.frayshare.app.core.model.Role
+import com.frayshare.app.core.model.TransferItem
 import com.frayshare.app.core.model.TransferProgress
 import com.frayshare.app.core.qr.Pairing
 import com.frayshare.app.core.source.Catalog
@@ -69,6 +72,7 @@ import com.frayshare.app.core.util.Format
 import com.frayshare.app.ui.QrImage
 import com.frayshare.app.ui.QrScanner
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @Composable
@@ -164,6 +168,31 @@ fun TransferFlow(
                     )
                 } else {
                     var scanning by remember { mutableStateOf(false) }
+                    var folderItems by remember { mutableStateOf<List<TransferItem>>(emptyList()) }
+                    var folderLabel by remember { mutableStateOf<String?>(null) }
+                    var folderBusy by remember { mutableStateOf(false) }
+                    val scope = rememberCoroutineScope()
+                    val folderLauncher = rememberLauncherForActivityResult(
+                        ActivityResultContracts.OpenDocumentTree()
+                    ) { uri ->
+                        if (uri != null) {
+                            runCatching {
+                                context.contentResolver.takePersistableUriPermission(
+                                    uri,
+                                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                                )
+                            }
+                            folderBusy = true
+                            scope.launch {
+                                val picked = withContext(Dispatchers.IO) {
+                                    Sources.folder(context, uri)
+                                }
+                                folderItems = picked.first
+                                folderLabel = picked.second
+                                folderBusy = false
+                            }
+                        }
+                    }
                     Text("Выберите, что отправить", style = MaterialTheme.typography.headlineSmall)
                     kinds.forEach { kind ->
                         KindRow(
@@ -175,7 +204,32 @@ fun TransferFlow(
                             }
                         )
                     }
-                    val items = cat.selected(selected)
+                    OutlinedButton(
+                        onClick = { folderLauncher.launch(null) },
+                        enabled = !folderBusy,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = MaterialTheme.shapes.large
+                    ) {
+                        Icon(Icons.Filled.Folder, contentDescription = null)
+                        Text(if (folderLabel == null) "Добавить папку" else "Заменить папку")
+                    }
+                    if (folderBusy) {
+                        LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth(),
+                            strokeCap = StrokeCap.Round
+                        )
+                    }
+                    if (folderLabel != null && folderItems.isNotEmpty()) {
+                        Text(
+                            "Папка «$folderLabel»: ${folderItems.size} ${Format.plural(folderItems.size, "файл", "файла", "файлов")} · ${Format.bytes(folderItems.sumOf { it.sizeBytes })}",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        TextButton(onClick = { folderItems = emptyList(); folderLabel = null }) {
+                            Text("Убрать папку")
+                        }
+                    }
+                    val items = cat.selected(selected) + folderItems
                     Text(
                         if (items.isEmpty()) "Ничего не выбрано" else
                             "${items.size} ${Format.plural(items.size, "файл", "файла", "файлов")} · ${Format.bytes(items.sumOf { it.sizeBytes })}",

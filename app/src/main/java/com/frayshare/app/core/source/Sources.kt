@@ -8,8 +8,10 @@ import android.os.Build
 import android.os.Environment
 import android.provider.ContactsContract
 import android.provider.MediaStore
+import androidx.documentfile.provider.DocumentFile
 import com.frayshare.app.core.model.DataKind
 import com.frayshare.app.core.model.TransferItem
+import com.frayshare.app.core.util.PathSafe
 import java.io.File
 
 data class Catalog(
@@ -91,6 +93,37 @@ object Sources {
             )
         }
         return out.sortedBy { it.name.lowercase() }
+    }
+
+    fun folder(context: Context, root: Uri): Pair<List<TransferItem>, String> {
+        val dir = DocumentFile.fromTreeUri(context, root)
+            ?: return emptyList<TransferItem>() to ""
+        if (!dir.canRead()) return emptyList<TransferItem>() to ""
+        val rootName = (dir.name ?: "Папка").take(60).ifBlank { "Папка" }
+        val out = mutableListOf<TransferItem>()
+        walk(dir, "$rootName/", out)
+        return out to rootName
+    }
+
+    private fun walk(dir: DocumentFile, prefix: String, out: MutableList<TransferItem>) {
+        for (child in dir.listFiles()) {
+            if (child.isDirectory) {
+                val name = child.name ?: continue
+                walk(child, "$prefix${PathSafe.clean(name)}/", out)
+            } else if (child.isFile) {
+                val name = child.name ?: continue
+                if (name.endsWith(".fraypart")) continue
+                out.add(
+                    TransferItem(
+                        id = child.uri.toString(),
+                        name = "$prefix${PathSafe.clean(name)}",
+                        kind = DataKind.FILE,
+                        sizeBytes = child.length(),
+                        uri = child.uri.toString()
+                    )
+                )
+            }
+        }
     }
 
     fun contacts(context: Context): List<TransferItem> {
