@@ -50,7 +50,7 @@
 
 ## Стек
 
-Kotlin 2.2, Jetpack Compose, `androidx.compose.material3:material3:1.4.0`, Kotlin coroutines, AGP 8.13.2, Gradle 8.14.7. Сборка и тесты прогоняются в GitHub Actions на каждый пуш.
+Kotlin (встроенная поддержка в AGP 9), Jetpack Compose, `androidx.compose.material3:material3:1.5.0`, Kotlin coroutines, AGP 9.5.1, Gradle 9.9.1. Сборка и тесты прогоняются в GitHub Actions на каждый пуш.
 
 ## Дорожная карта
 

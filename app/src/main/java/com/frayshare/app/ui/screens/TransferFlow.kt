@@ -24,12 +24,12 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.FilledTonalCard
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.LinearWavyProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -110,7 +110,7 @@ fun TransferFlow(
     ) {
         Spacer(Modifier.height(4.dp))
         if (fullMode && progress.state == JobState.IDLE && role == Role.NONE) {
-            FilledTonalCard(
+            Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = MaterialTheme.shapes.extraLarge
             ) {
@@ -246,7 +246,7 @@ private fun RoleCards(onSend: () -> Unit, onReceive: () -> Unit) {
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        FilledTonalCard(
+        Card(
             onClick = onSend,
             modifier = Modifier.weight(1f),
             shape = MaterialTheme.shapes.large
@@ -264,7 +264,7 @@ private fun RoleCards(onSend: () -> Unit, onReceive: () -> Unit) {
                 )
             }
         }
-        FilledTonalCard(
+        Card(
             onClick = onReceive,
             modifier = Modifier.weight(1f),
             shape = MaterialTheme.shapes.large
@@ -294,7 +294,7 @@ private fun KindRow(
 ) {
     val (icon, title) = kindInfo(kind)
     val items = catalog.of(kind)
-    FilledTonalCard(
+    Card(
         modifier = Modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.large
     ) {
@@ -368,7 +368,7 @@ private fun ProgressCard(
     isReceiver: Boolean,
     onDone: () -> Unit
 ) {
-    FilledTonalCard(
+    Card(
         modifier = Modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.extraLarge
     ) {
@@ -384,10 +384,9 @@ private fun ProgressCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            LinearProgressIndicator(
+            LinearWavyProgressIndicator(
                 progress = { Format.percent(progress.bytesDone, progress.bytesTotal) },
-                modifier = Modifier.fillMaxWidth(),
-                strokeCap = StrokeCap.Round
+                modifier = Modifier.fillMaxWidth()
             )
             Text(
                 "${Format.bytes(progress.bytesDone)} из ${Format.bytes(progress.bytesTotal)}",
