@@ -1,6 +1,7 @@
 package com.frayshare.app.core.transfer
 
 import android.content.Context
+import com.frayshare.app.core.discovery.Discovery
 import com.frayshare.app.core.discovery.DiscoveredPeer
 import com.frayshare.app.core.history.HistoryStore
 import com.frayshare.app.core.model.HistoryEntry
