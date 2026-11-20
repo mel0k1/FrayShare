@@ -35,6 +35,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.LinearWavyProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -51,6 +52,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -64,6 +66,8 @@ import com.frayshare.app.core.model.Role
 import com.frayshare.app.core.model.TransferItem
 import com.frayshare.app.core.model.TransferProgress
 import com.frayshare.app.core.qr.Pairing
+import com.frayshare.app.core.share.ShareIn
+import com.frayshare.app.core.share.ShareInbox
 import com.frayshare.app.core.source.Catalog
 import com.frayshare.app.core.source.Sources
 import com.frayshare.app.core.transfer.Protocol
@@ -85,6 +89,7 @@ fun TransferFlow(
     val progress by TransferController.progress.collectAsState()
     val invite by TransferController.invite.collectAsState()
     val peer by Discovery.peer.collectAsState()
+    val shared by ShareInbox.shared.collectAsState()
     var role by rememberSaveable { mutableStateOf(Role.NONE) }
     var granted by remember { mutableStateOf(false) }
     var catalog by remember { mutableStateOf<Catalog?>(null) }
@@ -115,6 +120,10 @@ fun TransferFlow(
         onDispose { Discovery.stop() }
     }
 
+    LaunchedEffect(progress.state) {
+        if (progress.state == JobState.COMPLETED) ShareInbox.clear()
+    }
+
     Column(
         modifier = modifier
             .verticalScroll(rememberScrollState())
@@ -137,6 +146,35 @@ fun TransferFlow(
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                }
+            }
+        }
+        if (!fullMode && shared.isNotEmpty() && progress.state == JobState.IDLE && role != Role.RECEIVE) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = MaterialTheme.shapes.extraLarge
+            ) {
+                Column(
+                    modifier = Modifier.padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        "Из «Поделиться»: ${shared.size} ${Format.plural(shared.size, "элемент", "элемента", "элементов")} · ${Format.bytes(shared.sumOf { it.sizeBytes })}",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Text(
+                        previewNames(shared),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(onClick = { role = Role.SEND }) {
+                            Text("Отправить")
+                        }
+                        OutlinedButton(onClick = { ShareInbox.clear() }) {
+                            Text("Отменить")
+                        }
+                    }
                 }
             }
         }
@@ -229,7 +267,42 @@ fun TransferFlow(
                             Text("Убрать папку")
                         }
                     }
-                    val items = cat.selected(selected) + folderItems
+                    if (!fullMode) {
+                        var textDraft by remember { mutableStateOf("") }
+                        val clipboard = LocalClipboardManager.current
+                        OutlinedTextField(
+                            value = textDraft,
+                            onValueChange = { textDraft = it },
+                            label = { Text("Ссылка или текст") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            shape = MaterialTheme.shapes.large
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            OutlinedButton(
+                                onClick = { textDraft = clipboard.getText()?.toString().orEmpty() }
+                            ) {
+                                Text("Вставить")
+                            }
+                            Button(
+                                onClick = {
+                                    ShareIn.makeTextItem(context, textDraft)?.let { ShareInbox.add(it) }
+                                    textDraft = ""
+                                },
+                                enabled = textDraft.isNotBlank()
+                            ) {
+                                Text("Добавить к отправке")
+                            }
+                        }
+                        if (shared.isNotEmpty()) {
+                            Text(
+                                "Ссылки и файлы из «Поделиться» тоже уйдут получателю",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    val items = cat.selected(selected) + folderItems + shared
                     Text(
                         if (items.isEmpty()) "Ничего не выбрано" else
                             "${items.size} ${Format.plural(items.size, "файл", "файла", "файлов")} · ${Format.bytes(items.sumOf { it.sizeBytes })}",
@@ -356,8 +429,12 @@ private fun kindInfo(kind: DataKind): Pair<ImageVector, String> = when (kind) {
     DataKind.CONTACT -> Icons.Filled.ContactPhone to "Контакты"
 }
 
-private fun statusText(progress: TransferProgress): String = when (progress.state) {
-    JobState.AWAITING_PEER -> "Ожидание подключения"
+private fun previewNames(items: List<TransferItem>): String {
+    val first = items.take(3).joinToString(", ") { it.name }
+    return if (items.size > 3) "$first и ещё ${items.size - 3}" else first
+}
+
+private fun statusText(progress: TransferProgress): String = when (progress.state) {    JobState.AWAITING_PEER -> "Ожидание подключения"
     JobState.CONNECTED -> "Соединено: ${progress.peerName}"
     JobState.RUNNING -> "Передача"
     JobState.COMPLETED -> "Готово"

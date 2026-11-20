@@ -15,12 +15,15 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import com.frayshare.app.core.share.ShareInbox
 import com.frayshare.app.ui.screens.FullMigrationScreen
 import com.frayshare.app.ui.screens.HistoryScreen
 import com.frayshare.app.ui.screens.TransferScreen
@@ -38,6 +41,10 @@ private val tabs = listOf(
 @Composable
 fun FrayApp() {
     var selected by rememberSaveable { mutableIntStateOf(0) }
+    val shared by ShareInbox.shared.collectAsState()
+    LaunchedEffect(shared) {
+        if (shared.isNotEmpty()) selected = 0
+    }
     Scaffold(
         topBar = {
             TopAppBar(
