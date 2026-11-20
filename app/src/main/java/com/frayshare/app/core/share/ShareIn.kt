@@ -103,8 +103,9 @@ object ShareIn {
         var mime = declared
         if (mime.isBlank()) mime = runCatching { resolver.getType(uri) }.getOrDefault("") ?: ""
         if (size < 0) {
+            // available() возвращает размер буфера, а не файла — размер берём у файлового дескриптора.
             size = runCatching {
-                resolver.openInputStream(uri)?.use { it.available().toLong() } ?: 0L
+                resolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: 0L
             }.getOrDefault(0L)
             if (size < 0) size = 0
         }

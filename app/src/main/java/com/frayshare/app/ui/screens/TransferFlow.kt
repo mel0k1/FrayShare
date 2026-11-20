@@ -91,7 +91,6 @@ fun TransferFlow(
     val peer by Discovery.peer.collectAsState()
     val shared by ShareInbox.shared.collectAsState()
     var role by rememberSaveable { mutableStateOf(Role.NONE) }
-    var granted by remember { mutableStateOf(false) }
     var catalog by remember { mutableStateOf<Catalog?>(null) }
     var selected by rememberSaveable {
         mutableStateOf(if (fullMode) kinds.toSet() else setOf(DataKind.PHOTO, DataKind.VIDEO))
@@ -99,19 +98,19 @@ fun TransferFlow(
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { result ->
-        granted = result.values.all { it }
-    }
+    ) { }
 
     LaunchedEffect(Unit) {
         val missing = requiredPermissions().filter {
             ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
         }
-        if (missing.isEmpty()) granted = true else permissionLauncher.launch(missing.toTypedArray())
+        if (missing.isNotEmpty()) permissionLauncher.launch(missing.toTypedArray())
     }
 
-    LaunchedEffect(granted) {
-        if (granted && catalog == null) {
+    // Каталог грузим независимо от того, что пользователь разрешил:
+    // без прав конкретная категория просто покажет «Пусто».
+    LaunchedEffect(Unit) {
+        if (catalog == null) {
             catalog = withContext(Dispatchers.IO) { Sources.load(context) }
         }
     }
@@ -410,8 +409,12 @@ fun TransferFlow(
 
 private fun requiredPermissions(): List<String> {
     val base = mutableListOf(Manifest.permission.READ_CONTACTS)
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        base += listOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            base += listOf(
+                Manifest.permission.READ_MEDIA_IMAGES,
+                Manifest.permission.READ_MEDIA_VIDEO,
+                Manifest.permission.POST_NOTIFICATIONS
+            )
     } else {
         base += Manifest.permission.READ_EXTERNAL_STORAGE
     }

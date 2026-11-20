@@ -69,6 +69,7 @@ class BoxChannel(
 
     companion object {
         const val TAG = 16
-        const val MAX_PLAIN = 1 shl 20
+        // 16 МБ: манифест полного переноса с десятками тысяч файлов идёт одним кадром.
+        const val MAX_PLAIN = 1 shl 24
     }
 }

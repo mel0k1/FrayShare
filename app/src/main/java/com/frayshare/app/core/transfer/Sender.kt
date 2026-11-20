@@ -3,6 +3,7 @@ package com.frayshare.app.core.transfer
 import android.content.Context
 import android.net.Uri
 import android.os.Build
+import android.util.Log
 import com.frayshare.app.core.crypto.BoxChannel
 import com.frayshare.app.core.crypto.Keys
 import com.frayshare.app.core.discovery.DiscoveredPeer
@@ -26,6 +27,13 @@ import java.net.Socket
 
 object Sender {
 
+    @Volatile private var active: Socket? = null
+
+    // Отмена передачи: закрыть сокет, чтобы застрявший read/write немедленно вышел.
+    fun abort() {
+        runCatching { active?.close() }
+    }
+
     suspend fun send(
         context: Context,
         peer: DiscoveredPeer,
@@ -40,6 +48,8 @@ object Sender {
         try {
             socket.connect(InetSocketAddress(peer.address, peer.port), 8000)
             socket.tcpNoDelay = true
+            socket.soTimeout = IDLE_TIMEOUT_MS
+            active = socket
             val rawInput = Protocol.input(socket)
             val rawOutput = Protocol.output(socket)
             val (key, remoteName) = handshake(rawInput, rawOutput, peer)
@@ -70,9 +80,9 @@ object Sender {
                     skip(stream, offset)
                     val buffer = ByteArray(Protocol.CHUNK)
                     var done = offset
-                    var lastEmit = 0L
-                    var lastEmitBytes = sentBytes
-                    var lastEmitTime = 0L
+                        var lastEmit = 0L
+                        var lastEmitBytes = sentBytes
+                        var lastEmitTime = System.currentTimeMillis()
                     while (true) {
                         ensureActive()
                         val read = stream.read(buffer)
@@ -148,9 +158,11 @@ object Sender {
             throw e
         } catch (e: Exception) {
             coroutineContext.ensureActive()
+            Log.w(TAG, "send failed: ${e.message}")
             JobResult(success = false, items = sentItems, bytes = sentBytes, device = peerName)
         } finally {
             runCatching { socket.close() }
+            if (active === socket) active = null
         }
     }
 
@@ -239,6 +251,7 @@ object Sender {
             .put("type", "manifest")
             .put("resume", true)
             .put("proto", Protocol.PROTO)
+            .put("device", Build.MODEL)
             .put(
                 "items",
                 JSONArray().apply {
@@ -248,6 +261,15 @@ object Sender {
                                 .put("name", item.name)
                                 .put("kind", item.kind.name)
                                 .put("size", item.sizeBytes)
+                                .put(
+                                    "token",
+                                    ResumeToken.of(
+                                        item.kind.name,
+                                        item.name,
+                                        item.sizeBytes,
+                                        item.uri ?: item.filePath ?: ""
+                                    )
+                                )
                         )
                     }
                 }
@@ -281,4 +303,7 @@ object Sender {
 
     const val MODE_PSK = "psk"
     const val MODE_ECDH = "ecdh"
+
+    private const val IDLE_TIMEOUT_MS = 30_000
+    private const val TAG = "Fray"
 }

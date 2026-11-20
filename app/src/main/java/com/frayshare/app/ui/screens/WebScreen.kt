@@ -37,6 +37,7 @@ import com.frayshare.app.core.webshare.WebServer
 fun WebScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     var server by remember { mutableStateOf<WebServer?>(null) }
+    var startError by remember { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
 
     DisposableEffect(Unit) {
@@ -105,8 +106,18 @@ fun WebScreen(modifier: Modifier = Modifier) {
                         }
                     }
                 } else {
-                    Button(onClick = { server = WebServer.start(context) }) {
+                    Button(onClick = {
+                        server = WebServer.start(context)
+                        startError = server == null
+                    }) {
                         Text("Включить доступ")
+                    }
+                    if (startError) {
+                        Text(
+                            "Порт занят предыдущим сервером — подождите около минуты и попробуйте снова",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.error
+                        )
                     }
                 }
             }

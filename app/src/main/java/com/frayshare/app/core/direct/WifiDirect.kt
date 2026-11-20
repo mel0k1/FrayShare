@@ -67,8 +67,14 @@ object WifiDirect {
     }
 
     fun start(appContext: Context) {
-        if (manager != null) return
         val app = appContext.applicationContext
+        val existing = manager
+        val existingChannel = channel
+        if (existing != null && existingChannel != null) {
+            // Повторный запуск после stopScanning: менеджер жив, нужно искать заново.
+            discover(existing, existingChannel)
+            return
+        }
         val mgr = app.getSystemService(Context.WIFI_P2P_SERVICE) as? WifiP2pManager
         if (mgr == null) {
             _state.value = DirectState.Failed("Устройство не поддерживает Wi-Fi Direct")
@@ -85,6 +91,10 @@ object WifiDirect {
         }
         ContextCompat.registerReceiver(app, handler, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
         registered = true
+        discover(mgr, ch)
+    }
+
+    private fun discover(mgr: WifiP2pManager, ch: WifiP2pManager.Channel) {
         mgr.discoverPeers(
             ch,
             listener(

@@ -2,6 +2,7 @@ package com.frayshare.app.core.transfer
 
 import android.content.Context
 import android.os.Build
+import android.util.Log
 import com.frayshare.app.core.crypto.BoxChannel
 import com.frayshare.app.core.crypto.Keys
 import com.frayshare.app.core.model.JobState
@@ -15,10 +16,21 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketTimeoutException
 
 object Receiver {
+
+    @Volatile private var listener: ServerSocket? = null
+    @Volatile private var active: Socket? = null
+
+    // Отмена передачи: закрыть сокеты, чтобы accept/read немедленно вышли.
+    fun abort() {
+        runCatching { listener?.close() }
+        runCatching { active?.close() }
+    }
 
     suspend fun receive(
         context: Context,
@@ -28,12 +40,32 @@ object Receiver {
         var receivedBytes = 0L
         var receivedItems = 0
         var device = ""
-        val server = ServerSocket(Protocol.PORT)
+        var server: ServerSocket? = null
         try {
+            server = ServerSocket().apply {
+                reuseAddress = true
+                bind(InetSocketAddress(Protocol.PORT))
+            }
+            listener = server
             onProgress(TransferProgress(state = JobState.AWAITING_PEER))
-            val socket = server.accept()
+            server.soTimeout = ACCEPT_POLL_MS
+
+            fun acceptPeer(): Socket {
+                while (true) {
+                    ensureActive()
+                    try {
+                        return server.accept()
+                    } catch (e: SocketTimeoutException) {
+                        // Порт свободен, ждём отправителя; отмена выходит через ensureActive.
+                    }
+                }
+            }
+
+            val socket = acceptPeer()
+            active = socket
             try {
                 socket.tcpNoDelay = true
+                socket.soTimeout = IDLE_TIMEOUT_MS
                 val rawInput = Protocol.input(socket)
                 val rawOutput = Protocol.output(socket)
                 val channel = handshake(rawInput, rawOutput, pairingKey)
@@ -44,8 +76,11 @@ object Receiver {
                 } ?: emptyList()
                 val names = entries.map { it.optString("name") }
                 val sizes = entries.map { it.optLong("size") }
+                val tokens = entries.map { it.optString("token") }
                 val staging = Staging(context)
-                val plan = Plan.compute(sizes, names.map { staging.stored(it) })
+                val plan = Plan.compute(sizes, names.mapIndexed { index, name ->
+                    staging.stored(name, tokens[index])
+                })
                 channel.send(planMessage(plan))
                 val totalBytes = sizes.sumOf { it }
                 val resumeBytes = plan.sumOf { it.offset }
@@ -66,13 +101,19 @@ object Receiver {
                 }
 
                 fun receiveInto(position: Int, size: Long, offset: Long, name: String) {
-                    if (offset >= size) return
+                    if (offset >= size) {
+                        // Пустой файл: создать его на диске, иначе он молча потеряется.
+                        if (size == 0L && !staging.partExists(name)) {
+                            staging.createEmpty(name)
+                        }
+                        return
+                    }
                     val sink = staging.sink(name, offset == 0L)
                     sink.use { target ->
                         var done = offset
                         var lastEmit = 0L
                         var lastEmitBytes = receivedBytes
-                        var lastEmitTime = 0L
+                        var lastEmitTime = System.currentTimeMillis()
                         while (done < size) {
                             ensureActive()
                             val frame = channel.receive()
@@ -145,14 +186,17 @@ object Receiver {
                 JobResult(success = true, items = receivedItems, bytes = receivedBytes, device = device)
             } finally {
                 runCatching { socket.close() }
+                if (active === socket) active = null
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             coroutineContext.ensureActive()
+            Log.w(TAG, "receive failed: ${e.message}")
             JobResult(success = false, items = receivedItems, bytes = receivedBytes, device = device)
         } finally {
-            runCatching { server.close() }
+            runCatching { server?.close() }
+            if (listener === server) listener = null
         }
     }
 
@@ -232,4 +276,8 @@ object Receiver {
 
     private fun readJson(channel: BoxChannel): JSONObject =
         JSONObject(String(channel.receive(), Charsets.UTF_8))
+
+    private const val ACCEPT_POLL_MS = 1500
+    private const val IDLE_TIMEOUT_MS = 30_000
+    private const val TAG = "Fray"
 }

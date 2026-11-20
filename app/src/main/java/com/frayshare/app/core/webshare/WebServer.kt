@@ -43,12 +43,12 @@ class WebServer private constructor(
     }
 
     private fun handle(socket: Socket) {
-        socket.soTimeout = 30000
-        socket.tcpNoDelay = true
-        val input = DataInputStream(BufferedInputStream(socket.getInputStream(), 8192))
-        val raw = BufferedOutputStream(socket.getOutputStream(), Protocol.CHUNK)
-        val request = Http.parse(readHead(input))
         try {
+            socket.soTimeout = 30000
+            socket.tcpNoDelay = true
+            val input = DataInputStream(BufferedInputStream(socket.getInputStream(), 8192))
+            val raw = BufferedOutputStream(socket.getOutputStream(), Protocol.CHUNK)
+            val request = Http.parse(readHead(input))
             when {
                 request == null -> respond(raw, 400, "Bad Request", "bad request")
                 request.method == "GET" && request.path == "/" -> servePage(raw)
@@ -124,7 +124,8 @@ class WebServer private constructor(
         stream.use { source ->
             raw.write(head(200, "OK", listOf(
                 "Content-Type: ${Mime.of(item.name)}",
-                "Content-Length: ${item.sizeBytes}",
+                // Актуальный размер: снимок из /api/list мог устареть.
+                "Content-Length: ${actualSize(item)}",
                 "Content-Disposition: ${Http.encodeFilename(item.name)}",
                 "Cache-Control: no-store"
             )))
@@ -136,6 +137,19 @@ class WebServer private constructor(
             }
             raw.flush()
         }
+    }
+
+    private fun actualSize(item: TransferItem): Long {
+        val uri = item.uri
+        if (uri != null) {
+            return runCatching {
+                context.contentResolver.openFileDescriptor(Uri.parse(uri), "r")?.use {
+                    it.statSize
+                } ?: item.sizeBytes
+            }.getOrDefault(item.sizeBytes)
+        }
+        val path = item.filePath ?: return item.sizeBytes
+        return runCatching { java.io.File(path).length() }.getOrDefault(item.sizeBytes)
     }
 
     private fun serveThumb(request: HttpRequest, raw: BufferedOutputStream) {
@@ -182,6 +196,8 @@ class WebServer private constructor(
             }
             staging.finalize(name)
         } catch (e: Exception) {
+            // Недогруженный .fraypart для веб-загрузок мусор — убираем сразу.
+            staging.deletePart(name)
             respond(raw, 500, "Server Error", "не удалось сохранить файл")
             return
         }
@@ -241,13 +257,15 @@ class WebServer private constructor(
         const val MAX_UPLOAD = 8L * 1024 * 1024 * 1024
         const val PAGE = "web/index.html"
 
-        fun start(context: Context): WebServer {
-            val server = ServerSocket(PORT)
+        fun start(context: Context): WebServer? = runCatching {
+            val server = ServerSocket()
+            server.reuseAddress = true
+            server.bind(java.net.InetSocketAddress(PORT))
             val token = token()
             val web = WebServer(context.applicationContext, server, token)
             Thread({ web.acceptLoop() }, "fray-web").apply { isDaemon = true }.start()
-            return web
-        }
+            web
+        }.getOrNull()
 
         private fun token(): String {
             val bytes = ByteArray(10)

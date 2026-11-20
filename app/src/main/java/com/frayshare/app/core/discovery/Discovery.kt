@@ -32,13 +32,18 @@ object Discovery {
 
     private var announceJob: Job? = null
     private var listenJob: Job? = null
+    @Volatile private var announceSocket: DatagramSocket? = null
+    @Volatile private var listenSocket: DatagramSocket? = null
 
     fun startAnnouncing(deviceName: String) {
         stop()
         announceJob = scope.launch {
-            DatagramSocket().use { socket ->
-                socket.broadcast = true
-                socket.soTimeout = 1500
+            val socket = DatagramSocket().apply {
+                broadcast = true
+                soTimeout = 1500
+                announceSocket = this
+            }
+            try {
                 val payload = JSONObject()
                     .put("role", "send")
                     .put("name", deviceName)
@@ -65,6 +70,9 @@ object Discovery {
                         delay(500)
                     }
                 }
+            } finally {
+                socket.close()
+                if (announceSocket === socket) announceSocket = null
             }
         }
     }
@@ -72,10 +80,19 @@ object Discovery {
     fun startListening(deviceName: String) {
         stop()
         listenJob = scope.launch {
-            val socket = DatagramSocket(Protocol.DISCOVERY_PORT)
+            val socket = try {
+                DatagramSocket(null).apply {
+                    reuseAddress = true
+                    bind(java.net.InetSocketAddress(Protocol.DISCOVERY_PORT))
+                    broadcast = true
+                    soTimeout = 2000
+                    listenSocket = this
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("Fray", "discovery bind failed: ${e.message}")
+                return@launch
+            }
             try {
-                socket.broadcast = true
-                socket.soTimeout = 2000
                 val buffer = ByteArray(4096)
                 while (isActive) {
                     try {
@@ -95,8 +112,10 @@ object Discovery {
                     }
                 }
             } catch (e: Exception) {
+                android.util.Log.w("Fray", "discovery listen stopped: ${e.message}")
             } finally {
                 socket.close()
+                if (listenSocket === socket) listenSocket = null
             }
         }
     }
@@ -106,6 +125,10 @@ object Discovery {
         listenJob?.cancel()
         announceJob = null
         listenJob = null
+        runCatching { announceSocket?.close() }
+        runCatching { listenSocket?.close() }
+        announceSocket = null
+        listenSocket = null
         _peer.value = null
     }
 }

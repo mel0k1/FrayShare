@@ -30,7 +30,11 @@ object HistoryStore {
                     success = obj.getBoolean("success")
                 )
             }
-        }.getOrDefault(emptyList())
+        }.getOrElse {
+            // Битый файл нельзя чинить вечно: сбросить, иначе история перестанет сохраняться.
+            target.delete()
+            emptyList()
+        }
     }
 
     fun append(context: Context, entry: HistoryEntry) {
@@ -49,7 +53,11 @@ object HistoryStore {
             while (array.length() > MAX_ENTRIES) {
                 array.remove(0)
             }
-            target.writeText(array.toString())
+            val tmp = File(context.filesDir, "history.json.tmp")
+            tmp.writeText(array.toString())
+            if (!tmp.renameTo(target)) {
+                tmp.delete()
+            }
         }
     }
 }

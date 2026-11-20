@@ -14,6 +14,8 @@ import com.frayshare.app.core.model.JobState
 import com.frayshare.app.core.model.TransferItem
 import com.frayshare.app.core.model.TransferProgress
 import com.frayshare.app.core.qr.Pairing
+import com.frayshare.app.service.TransferService
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -26,7 +28,11 @@ import kotlinx.coroutines.launch
 
 object TransferController {
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, error ->
+            android.util.Log.w("Fray", "transfer crashed: ${error.message}")
+        }
+    )
 
     private val _progress = MutableStateFlow(TransferProgress())
     val progress: StateFlow<TransferProgress> = _progress.asStateFlow()
@@ -53,10 +59,12 @@ object TransferController {
         Discovery.stop()
         WifiDirect.stopScanning()
         holdCpu(context)
+        goForeground(context)
         _progress.value = TransferProgress(state = JobState.CONNECTED, totalItems = items.size)
         activeJob = scope.launch {
+            val self = coroutineContext[Job]
             val result = Sender.send(context, peer, items) { update -> _progress.value = update }
-            finish(context, result, JobDirection.SEND)
+            finish(context, result, JobDirection.SEND, self)
         }
     }
 
@@ -66,22 +74,33 @@ object TransferController {
         val address = LocalIp.first()
         _invite.value = address?.let { Pairing.build(it, Protocol.PORT, key) }
         holdCpu(context)
+        goForeground(context)
         _progress.value = TransferProgress(state = JobState.AWAITING_PEER)
         activeJob = scope.launch {
+            val self = coroutineContext[Job]
             val result = Receiver.receive(context, key) { update -> _progress.value = update }
-            _invite.value = null
-            finish(context, result, JobDirection.RECEIVE)
+            if (self !== null && self === activeJob) _invite.value = null
+            finish(context, result, JobDirection.RECEIVE, self)
         }
     }
 
     fun cancel() {
         activeJob?.cancel()
         activeJob = null
+        Sender.abort()
+        Receiver.abort()
         Discovery.stop()
         WifiDirect.shutdown()
         releaseCpu()
         _invite.value = null
         _progress.value = TransferProgress(state = JobState.IDLE)
+    }
+
+    private fun goForeground(context: Context) {
+        androidx.core.content.ContextCompat.startForegroundService(
+            context,
+            android.content.Intent(context, TransferService::class.java)
+        )
     }
 
     private fun holdCpu(context: Context) {
@@ -95,8 +114,9 @@ object TransferController {
         wakeLock = null
     }
 
-    private fun finish(context: Context, result: JobResult, direction: JobDirection) {
-        if (!scope.isActive) return
+    private fun finish(context: Context, result: JobResult, direction: JobDirection, self: Job?) {
+        // Устаревший сеанс (осиротевшая корутина старого приёма) не должен трогать состояние.
+        if (self != null && self !== activeJob) return
         releaseCpu()
         WifiDirect.shutdown()
         _progress.value = _progress.value.copy(

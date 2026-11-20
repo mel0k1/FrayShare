@@ -14,7 +14,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        handleIntent(intent)
+        // При пересоздании активити интент тот же — не писать share-файлы заново.
+        if (savedInstanceState == null) handleIntent(intent)
         setContent {
             FrayTheme {
                 FrayApp()
