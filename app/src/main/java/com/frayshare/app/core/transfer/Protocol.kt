@@ -11,6 +11,7 @@ object Protocol {
     const val PORT = 47470
     const val DISCOVERY_PORT = 47471
     const val CHUNK = 64 * 1024
+    const val PROTO = 2
 
     fun input(socket: Socket): DataInputStream =
         DataInputStream(BufferedInputStream(socket.getInputStream(), CHUNK))

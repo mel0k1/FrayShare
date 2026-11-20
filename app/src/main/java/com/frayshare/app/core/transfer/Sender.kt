@@ -54,62 +54,93 @@ object Sender {
                 )
             )
             channel.send(manifest(items))
-            val offsets = readPlan(channel, items.size)
+            val plan = readPlan(channel, items.size)
+            val offsets = plan.offsets
             sentBytes = offsets.sum()
-            items.forEachIndexed { index, item ->
-                ensureActive()
-                val offset = offsets[index]
-                channel.send(
-                    JSONObject()
-                        .put("type", "item")
-                        .put("index", index)
-                        .put("size", item.sizeBytes)
-                        .put("offset", offset)
-                        .toString()
-                        .toByteArray()
-                )
-                if (offset < item.sizeBytes) {
-                    val source = openStream(context, item)
-                    source.use { stream ->
-                        skip(stream, offset)
-                        val buffer = ByteArray(Protocol.CHUNK)
-                        var done = offset
-                        var lastEmit = 0L
-                        var lastEmitBytes = sentBytes
-                        var lastEmitTime = 0L
-                        while (true) {
-                            ensureActive()
-                            val read = stream.read(buffer)
-                            if (read < 0) break
-                            channel.send(buffer.copyOf(read))
-                            done += read
-                            sentBytes += read
-                            val now = System.currentTimeMillis()
-                            if (now - lastEmit > 120) {
-                                val speed = (sentBytes - lastEmitBytes) * 1000 /
-                                    maxOf(now - lastEmitTime, 1L)
-                                lastEmitBytes = sentBytes
-                                lastEmitTime = now
-                                lastEmit = now
-                                onProgress(
-                                    running(
-                                        index, items.size, item.name,
-                                        sentBytes, totalBytes, peerName, speed
-                                    )
+            val segments = if (plan.proto >= Protocol.PROTO) {
+                Bundler.group(items.map { it.sizeBytes })
+            } else {
+                items.indices.map { Segment(it, 1, solo = true) }
+            }
+
+            fun writeItem(position: Int, item: TransferItem, offset: Long) {
+                if (offset >= item.sizeBytes) return
+                val source = openStream(context, item)
+                source.use { stream ->
+                    skip(stream, offset)
+                    val buffer = ByteArray(Protocol.CHUNK)
+                    var done = offset
+                    var lastEmit = 0L
+                    var lastEmitBytes = sentBytes
+                    var lastEmitTime = 0L
+                    while (true) {
+                        ensureActive()
+                        val read = stream.read(buffer)
+                        if (read < 0) break
+                        channel.send(buffer.copyOf(read))
+                        done += read
+                        sentBytes += read
+                        val now = System.currentTimeMillis()
+                        if (now - lastEmit > 120) {
+                            val speed = (sentBytes - lastEmitBytes) * 1000 /
+                                maxOf(now - lastEmitTime, 1L)
+                            lastEmitBytes = sentBytes
+                            lastEmitTime = now
+                            lastEmit = now
+                            onProgress(
+                                running(
+                                    position, items.size, item.name,
+                                    sentBytes, totalBytes, peerName, speed
                                 )
-                            }
-                        }
-                        if (done != item.sizeBytes) {
-                            throw IllegalStateException("size mismatch for ${item.name}")
+                            )
                         }
                     }
+                    if (done != item.sizeBytes) {
+                        throw IllegalStateException("size mismatch for ${item.name}")
+                    }
                 }
-                val ack = readJson(channel)
-                if (ack.optString("type") != "ack" || ack.optInt("index") != index) {
-                    throw IllegalStateException("bad ack for ${item.name}")
+            }
+
+            for (segment in segments) {
+                ensureActive()
+                val last = segment.first + segment.count - 1
+                if (segment.solo) {
+                    val item = items[segment.first]
+                    channel.send(
+                        itemHeader(segment.first, item.sizeBytes, offsets[segment.first])
+                    )
+                    writeItem(segment.first, item, offsets[segment.first])
+                    val ack = readJson(channel)
+                    if (ack.optString("type") != "ack" || ack.optInt("index") != segment.first) {
+                        throw IllegalStateException("bad ack for ${item.name}")
+                    }
+                    sentItems += 1
+                    onProgress(
+                        running(segment.first + 1, items.size, item.name, sentBytes, totalBytes, peerName)
+                    )
+                } else {
+                    channel.send(
+                        JSONObject()
+                            .put("type", "bundle")
+                            .put("index", segment.first)
+                            .put("count", segment.count)
+                            .toString()
+                            .toByteArray()
+                    )
+                    for (position in segment.first..last) {
+                        ensureActive()
+                        val item = items[position]
+                        writeItem(position, item, offsets[position])
+                        sentItems += 1
+                        onProgress(
+                            running(position + 1, items.size, item.name, sentBytes, totalBytes, peerName)
+                        )
+                    }
+                    val ack = readJson(channel)
+                    if (ack.optString("type") != "ack" || ack.optInt("index") != last) {
+                        throw IllegalStateException("bad bundle ack for $last")
+                    }
                 }
-                sentItems += 1
-                onProgress(running(index + 1, items.size, item.name, sentBytes, totalBytes, peerName))
             }
             channel.send(JSONObject().put("type", "done").toString().toByteArray())
             JobResult(success = true, items = sentItems, bytes = sentBytes, device = peerName)
@@ -122,6 +153,14 @@ object Sender {
             runCatching { socket.close() }
         }
     }
+
+    private fun itemHeader(index: Int, size: Long, offset: Long): ByteArray = JSONObject()
+        .put("type", "item")
+        .put("index", index)
+        .put("size", size)
+        .put("offset", offset)
+        .toString()
+        .toByteArray()
 
     private fun handshake(
         rawInput: DataInputStream,
@@ -158,7 +197,9 @@ object Sender {
         }
     }
 
-    private fun readPlan(channel: BoxChannel, expected: Int): LongArray {
+    private data class PlanReply(val offsets: LongArray, val proto: Int)
+
+    private fun readPlan(channel: BoxChannel, expected: Int): PlanReply {
         val plan = readJson(channel)
         if (plan.optString("type") != "plan") {
             throw IllegalStateException("missing plan")
@@ -171,7 +212,7 @@ object Sender {
             if (index !in 0 until expected) throw IllegalStateException("bad plan index")
             offsets[index] = entry.getLong("offset")
         }
-        return offsets
+        return PlanReply(offsets, plan.optInt("proto"))
     }
 
     private fun running(
@@ -197,6 +238,7 @@ object Sender {
         val payload = JSONObject()
             .put("type", "manifest")
             .put("resume", true)
+            .put("proto", Protocol.PROTO)
             .put(
                 "items",
                 JSONArray().apply {

@@ -59,56 +59,88 @@ object Receiver {
                         peerName = device
                     )
                 )
-                var lastEmit = 0L
-                for (position in entries.indices) {
-                    ensureActive()
-                    val header = readJson(channel)
-                    if (header.optString("type") != "item" || header.optInt("index") != position) {
-                        throw IllegalStateException("bad item header")
-                    }
-                    val size = header.optLong("size")
-                    val offset = header.optLong("offset")
-                    if (size != sizes[position] || offset != plan[position].offset) {
-                        throw IllegalStateException("plan mismatch for ${names[position]}")
-                    }
-                    val name = names[position]
-                    if (offset < size) {
-                        val sink = staging.sink(name, offset == 0L)
-                        sink.use { target ->
-                            var done = offset
-                            var lastEmitBytes = receivedBytes
-                            var lastEmitTime = 0L
-                            while (done < size) {
-                                ensureActive()
-                                val frame = channel.receive()
-                                target.write(frame)
-                                done += frame.size
-                                receivedBytes += frame.size
-                                val now = System.currentTimeMillis()
-                                if (now - lastEmit > 120) {
-                                    val speed = (receivedBytes - lastEmitBytes) * 1000 /
-                                        maxOf(now - lastEmitTime, 1L)
-                                    lastEmitBytes = receivedBytes
-                                    lastEmitTime = now
-                                    lastEmit = now
-                                    onProgress(
-                                        running(
-                                            position + 1, entries.size, name,
-                                            receivedBytes, totalBytes, device, speed
-                                        )
+                val segments = if (manifest.optInt("proto") >= Protocol.PROTO) {
+                    Bundler.group(sizes)
+                } else {
+                    entries.indices.map { Segment(it, 1, solo = true) }
+                }
+
+                fun receiveInto(position: Int, size: Long, offset: Long, name: String) {
+                    if (offset >= size) return
+                    val sink = staging.sink(name, offset == 0L)
+                    sink.use { target ->
+                        var done = offset
+                        var lastEmit = 0L
+                        var lastEmitBytes = receivedBytes
+                        var lastEmitTime = 0L
+                        while (done < size) {
+                            ensureActive()
+                            val frame = channel.receive()
+                            target.write(frame)
+                            done += frame.size
+                            receivedBytes += frame.size
+                            val now = System.currentTimeMillis()
+                            if (now - lastEmit > 120) {
+                                val speed = (receivedBytes - lastEmitBytes) * 1000 /
+                                    maxOf(now - lastEmitTime, 1L)
+                                lastEmitBytes = receivedBytes
+                                lastEmitTime = now
+                                lastEmit = now
+                                onProgress(
+                                    running(
+                                        position + 1, entries.size, name,
+                                        receivedBytes, totalBytes, device, speed
                                     )
-                                }
+                                )
                             }
                         }
                     }
-                    staging.finalize(name)
+                }
+
+                fun ack(index: Int) {
                     channel.send(
-                        JSONObject().put("type", "ack").put("index", position).toString().toByteArray()
+                        JSONObject().put("type", "ack").put("index", index).toString().toByteArray()
                     )
-                    receivedItems += 1
-                    onProgress(
-                        running(position + 1, entries.size, name, receivedBytes, totalBytes, device)
-                    )
+                }
+
+                for (segment in segments) {
+                    ensureActive()
+                    if (segment.solo) {
+                        val position = segment.first
+                        val header = readJson(channel)
+                        if (header.optString("type") != "item" || header.optInt("index") != position) {
+                            throw IllegalStateException("bad item header")
+                        }
+                        val size = header.optLong("size")
+                        val offset = header.optLong("offset")
+                        if (size != sizes[position] || offset != plan[position].offset) {
+                            throw IllegalStateException("plan mismatch for ${names[position]}")
+                        }
+                        receiveInto(position, size, offset, names[position])
+                        staging.finalize(names[position])
+                        ack(position)
+                        receivedItems += 1
+                        onProgress(
+                            running(position + 1, entries.size, names[position], receivedBytes, totalBytes, device)
+                        )
+                    } else {
+                        val header = readJson(channel)
+                        val validHeader = header.optString("type") == "bundle" &&
+                            header.optInt("index") == segment.first &&
+                            header.optInt("count") == segment.count
+                        if (!validHeader) {
+                            throw IllegalStateException("bad bundle header")
+                        }
+                        for (position in segment.first until segment.first + segment.count) {
+                            receiveInto(position, sizes[position], plan[position].offset, names[position])
+                            staging.finalize(names[position])
+                            receivedItems += 1
+                            onProgress(
+                                running(position + 1, entries.size, names[position], receivedBytes, totalBytes, device)
+                            )
+                        }
+                        ack(segment.first + segment.count - 1)
+                    }
                 }
                 JobResult(success = true, items = receivedItems, bytes = receivedBytes, device = device)
             } finally {
@@ -171,7 +203,12 @@ object Receiver {
         plan.forEach { entry ->
             array.put(JSONObject().put("index", entry.index).put("offset", entry.offset))
         }
-        return JSONObject().put("type", "plan").put("plan", array).toString().toByteArray()
+        return JSONObject()
+            .put("type", "plan")
+            .put("proto", Protocol.PROTO)
+            .put("plan", array)
+            .toString()
+            .toByteArray()
     }
 
     private fun running(
