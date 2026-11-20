@@ -5,6 +5,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CompareArrows
 import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Language
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -23,12 +24,14 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import com.frayshare.app.ui.screens.FullMigrationScreen
 import com.frayshare.app.ui.screens.HistoryScreen
 import com.frayshare.app.ui.screens.TransferScreen
+import com.frayshare.app.ui.screens.WebScreen
 
 private data class FrayTab(val label: String, val icon: ImageVector)
 
 private val tabs = listOf(
     FrayTab("Передача", Icons.Filled.CompareArrows),
     FrayTab("Полный перенос", Icons.Filled.Devices),
+    FrayTab("Веб", Icons.Filled.Language),
     FrayTab("История", Icons.Filled.History)
 )
 
@@ -60,6 +63,7 @@ fun FrayApp() {
         when (selected) {
             0 -> TransferScreen(Modifier.padding(padding))
             1 -> FullMigrationScreen(Modifier.padding(padding))
+            2 -> WebScreen(Modifier.padding(padding))
             else -> HistoryScreen(Modifier.padding(padding))
         }
     }

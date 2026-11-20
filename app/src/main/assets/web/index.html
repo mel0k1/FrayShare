@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FrayShare — доступ с компьютера</title>
+<style>
+  :root { --bg:#f4f2ef; --card:#fff; --ink:#1c1b1a; --mut:#6f6a64; --acc:#5b4fc4; --ok:#2e7d32; --err:#b3261e; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:920px; margin:0 auto; padding:clamp(12px,3vw,28px); }
+  h1 { font-size:clamp(1.25rem,4vw,1.7rem); margin:.2rem 0 .4rem; }
+  .mut { color:var(--mut); font-size:.9rem; }
+  .banner { background:#fdece9; color:var(--err); border-radius:14px; padding:14px 16px; margin:10px 0; }
+  .card { background:var(--card); border-radius:16px; padding:14px 16px; margin:12px 0; box-shadow:0 1px 3px rgba(0,0,0,.07); }
+  .toolbar { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+  .toolbar input[type=search] { flex:1 1 200px; min-width:160px; padding:10px 14px; border:1px solid #d8d3cc; border-radius:12px; font:inherit; }
+  button { padding:10px 18px; border:0; border-radius:12px; font:inherit; font-weight:600; cursor:pointer; background:#e8e4de; color:var(--ink); }
+  button.primary { background:var(--acc); color:#fff; }
+  button:disabled { opacity:.5; cursor:default; }
+  .drop { border:2px dashed #c9c2b8; border-radius:14px; padding:22px; text-align:center; cursor:pointer; transition:border-color .2s; }
+  .drop.over { border-color:var(--acc); background:#f1eefc; }
+  .bar { height:8px; background:#e8e4de; border-radius:6px; overflow:hidden; margin-top:8px; }
+  .bar > div { height:100%; background:var(--acc); width:0; transition:width .15s; }
+  .grp { display:flex; align-items:center; gap:10px; margin:18px 0 6px; }
+  .grp h2 { font-size:1.05rem; margin:0; flex:1; }
+  .row { display:flex; align-items:center; gap:10px; padding:7px 4px; border-bottom:1px solid #efece7; }
+  .row:last-child { border-bottom:0; }
+  .row img, .row .noimg { width:44px; height:44px; border-radius:10px; object-fit:cover; background:#ece8e2; flex:none; display:flex; align-items:center; justify-content:center; color:var(--mut); font-size:1.2rem; }
+  .name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .name a { color:var(--ink); text-decoration:none; }
+  .name a:hover { color:var(--acc); text-decoration:underline; }
+  .size { color:var(--mut); font-size:.85rem; flex:none; }
+  footer { text-align:center; padding:18px 0 30px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Файлы телефона</h1>
+  <p class="mut" id="sub">Скачивай фото, видео и загрузки на компьютер, закидывай файлы обратно. Загруженные файлы появятся в «Download/Fray» на телефоне.</p>
+  <div class="banner" id="keywarn" hidden>Ключ доступа не найден. Открой ссылку из приложения FrayShare (экран «Веб») — в ней есть ключ после <code>#t=</code>.</div>
+  <div class="banner" id="err" hidden></div>
+
+  <div class="card">
+    <div class="toolbar">
+      <input type="search" id="q" placeholder="Поиск по имени">
+      <button class="primary" id="dl" disabled>Скачать выбранное</button>
+      <button id="clear" disabled>Снять выбор</button>
+    </div>
+    <div class="mut" id="selinfo" style="margin-top:8px">Ничего не выбрано</div>
+    <div class="bar" id="dlbar" hidden><div></div></div>
+    <div class="mut" id="dlmsg" hidden></div>
+  </div>
+
+  <div class="card">
+    <div class="drop" id="drop">
+      <b>Перетащи файлы сюда</b> или нажми, чтобы выбрать<br>
+      <span class="mut">Файлы уйдут на телефон в Download/Fray</span>
+      <input type="file" id="file" multiple hidden>
+    </div>
+    <div class="bar" id="upbar" hidden><div></div></div>
+    <div class="mut" id="upmsg" style="margin-top:6px"></div>
+  </div>
+
+  <div id="list"></div>
+  <div style="text-align:center"><button id="more" hidden>Показать ещё</button></div>
+  <footer class="mut" id="dev"></footer>
+</main>
+<script>
+"use strict";
+const token = new URLSearchParams(location.hash.replace(/^#/, "")).get("t") || "";
+const api = p => p + (p.includes("?") ? "&" : "?") + "t=" + encodeURIComponent(token);
+const $ = id => document.getElementById(id);
+const CHUNK = 300;
+let items = [], shown = 0, chosen = new Set(), busy = false;
+
+const bytes = v => {
+  if (!v) return "0 Б";
+  const u = [["ТБ",1<<40],["ГБ",1<<30],["МБ",1<<20],["КБ",1<<10],["Б",1]];
+  for (const [s, f] of u) if (v >= f) return (Math.round(v / f * 10) / 10) + " " + s;
+  return v + " Б";
+};
+const fail = m => { $("err").textContent = m; $("err").hidden = false; };
+
+async function load() {
+  try {
+    const r = await fetch(api("/api/list"));
+    if (r.status === 401) { $("keywarn").hidden = false; return; }
+    if (!r.ok) throw new Error("list " + r.status);
+    const data = await r.json();
+    items = [];
+    for (const g of data.groups || [])
+      for (const it of g.items || [])
+        items.push({ id: it.id, name: it.name, size: it.size, kind: it.kind, group: g.title });
+    $("sub").textContent = data.device + " · " + items.length + " файлов. Скачивай фото, видео и загрузки, закидывай файлы обратно. Загруженные появятся в «Download/Fray».";
+    $("keywarn").hidden = true;
+    render(true);
+  } catch (e) { fail("Не удалось получить список файлов: " + e.message); }
+}
+
+function visible() {
+  const q = $("q").value.trim().toLowerCase();
+  return q ? items.filter(i => i.name.toLowerCase().includes(q)) : items;
+}
+
+function row(i) {
+  const d = document.createElement("div"); d.className = "row";
+  const cb = document.createElement("input");
+  cb.type = "checkbox"; cb.checked = chosen.has(i.id);
+  cb.onchange = () => { cb.checked ? chosen.add(i.id) : chosen.delete(i.id); selInfo(); };
+  d.appendChild(cb);
+  if (i.kind === "PHOTO" || i.kind === "VIDEO") {
+    const img = document.createElement("img");
+    img.loading = "lazy"; img.alt = "";
+    img.src = api("/api/thumb?id=" + i.id);
+    img.onerror = () => img.replaceWith(noimg());
+    d.appendChild(img);
+  } else d.appendChild(noimg());
+  const name = document.createElement("div"); name.className = "name";
+  const a = document.createElement("a");
+  a.href = api("/api/download?id=" + i.id);
+  a.download = i.name; a.textContent = i.name;
+  name.appendChild(a); d.appendChild(name);
+  const size = document.createElement("div"); size.className = "size";
+  size.textContent = bytes(i.size); d.appendChild(size);
+  return d;
+}
+const noimg = () => { const s = document.createElement("div"); s.className = "noimg"; s.textContent = "📄"; return s; };
+
+function header(title, groupItems) {
+  const w = document.createElement("div"); w.className = "grp";
+  const h = document.createElement("h2"); h.textContent = title + " · " + groupItems.length;
+  w.appendChild(h);
+  const all = document.createElement("button");
+  all.textContent = "Выбрать все";
+  all.onclick = () => { groupItems.forEach(i => chosen.add(i.id)); render(false); };
+  w.appendChild(all);
+  return w;
+}
+
+function render(reset) {
+  if (reset) { $("list").textContent = ""; shown = 0; }
+  const vis = visible();
+  const list = $("list"); list.textContent = "";
+  let lastGroup = null;
+  vis.slice(0, shown).forEach(i => {
+    if (i.group !== lastGroup) {
+      list.appendChild(header(i.group, vis.filter(x => x.group === i.group)));
+      lastGroup = i.group;
+    }
+    list.appendChild(row(i));
+  });
+  shown = Math.min(shown + CHUNK, vis.length);
+  $("more").hidden = shown >= vis.length;
+  $("more").textContent = "Показать ещё (" + (vis.length - shown) + ")";
+  selInfo();
+}
+
+function selInfo() {
+  const sel = items.filter(i => chosen.has(i.id));
+  $("selinfo").textContent = chosen.size
+    ? "Выбрано " + chosen.size + " · " + bytes(sel.reduce((s, i) => s + i.size, 0))
+    : "Ничего не выбрано";
+  $("dl").disabled = !chosen.size || busy;
+  $("clear").disabled = !chosen.size;
+}
+
+async function downloadSelected() {
+  busy = true; selInfo();
+  const bar = $("dlbar"); bar.hidden = false; const fill = bar.firstElementChild;
+  const msg = $("dlmsg"); msg.hidden = false;
+  const sel = items.filter(i => chosen.has(i.id));
+  for (let n = 0; n < sel.length; n++) {
+    msg.textContent = "Скачивание " + (n + 1) + " из " + sel.length + " · " + sel[n].name;
+    fill.style.width = (n / sel.length * 100) + "%";
+    const a = document.createElement("a");
+    a.href = api("/api/download?id=" + sel[n].id);
+    a.download = sel[n].name;
+    document.body.appendChild(a); a.click(); a.remove();
+    await new Promise(r => setTimeout(r, 500));
+  }
+  fill.style.width = "100%";
+  msg.textContent = "Готово — файлы в папке загрузок браузера";
+  busy = false; selInfo();
+  setTimeout(() => { bar.hidden = true; msg.hidden = true; fill.style.width = "0"; }, 4000);
+}
+
+function upload(file) {
+  return new Promise((res, rej) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", api("/api/upload?name=" + encodeURIComponent(file.name)));
+    xhr.upload.onprogress = e => {
+      if (e.lengthComputable) {
+        $("upbar").hidden = false;
+        $("upbar").firstElementChild.style.width = (e.loaded / e.total * 100) + "%";
+        $("upmsg").textContent = file.name + " · " + bytes(e.loaded) + " из " + bytes(e.total);
+      }
+    };
+    xhr.onload = () => xhr.status === 200 ? res() : rej(new Error("код " + xhr.status));
+    xhr.onerror = () => rej(new Error("сеть"));
+    xhr.send(file);
+  });
+}
+
+async function uploadAll(files) {
+  busy = true;
+  for (const f of files) {
+    $("upmsg").textContent = "Отправка " + f.name;
+    try { await upload(f); }
+    catch (e) { fail("Не удалось отправить " + f.name + ": " + e.message); busy = false; return; }
+  }
+  $("upbar").hidden = true;
+  $("upmsg").textContent = "Готово — файлы сохранены в Download/Fray на телефоне";
+  busy = false;
+  load();
+}
+
+$("q").oninput = () => render(true);
+$("more").onclick = () => render(false);
+$("dl").onclick = downloadSelected;
+$("clear").onclick = () => { chosen.clear(); render(false); };
+$("drop").onclick = () => $("file").click();
+$("file").onchange = e => uploadAll([...e.target.files]);
+["dragover", "dragenter"].forEach(ev => $("drop").addEventListener(ev, e => {
+  e.preventDefault(); $("drop").classList.add("over");
+}));
+["dragleave", "drop"].forEach(ev => $("drop").addEventListener(ev, e => {
+  e.preventDefault(); $("drop").classList.remove("over");
+}));
+$("drop").addEventListener("drop", e => uploadAll([...e.dataTransfer.files]));
+
+if (!token) $("keywarn").hidden = false;
+load();
+</script>
+</body>
+</html>
